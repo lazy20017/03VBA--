@@ -1,0 +1,4 @@
+# VBA导入工具依赖
+PyQt5>=5.15.0
+python-docx>=0.8.11
+pywin32>=300
