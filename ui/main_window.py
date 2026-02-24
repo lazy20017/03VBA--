@@ -1,18 +1,19 @@
 # -*- coding: utf-8 -*-
 """
 PyQt主窗口 - VBA导入工具主界面
+支持 Word、Excel、PowerPoint 的 VBA 代码管理
 """
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QTextEdit,
     QListWidget, QListWidgetItem, QCheckBox,
     QMessageBox, QFileDialog, QGroupBox,
-    QProgressBar, QApplication, QFrame
+    QProgressBar, QApplication, QFrame, QComboBox
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QFont, QIcon
 import os
-from core.word_handler import WordVBAHandler, scan_vba_folder
+from core.handler_factory import VBAHandlerFactory, FileType
 from core.vba_component import VBAComponent
 from utils.logger import setup_logger, get_logger
 
@@ -23,28 +24,41 @@ class WorkerThread(QThread):
     progress = pyqtSignal(str)
     log_signal = pyqtSignal(str)
 
-    def __init__(self, task_type, word_file, vba_folder, components=None):
+    def __init__(self, task_type, office_file, vba_folder, file_type, components=None):
         super().__init__()
         self.task_type = task_type  # 'export' or 'import'
-        self.word_file = word_file
+        self.office_file = office_file
         self.vba_folder = vba_folder
+        self.file_type = file_type
         self.components = components or []
         self.handler = None
 
     def run(self):
         try:
-            self.handler = WordVBAHandler()
-            self.log_signal.emit("正在初始化Word应用程序...")
+            self.handler = VBAHandlerFactory.get_handler(self.file_type)
+            app_name = VBAHandlerFactory.get_file_type_name(self.file_type)
+            self.log_signal.emit(f"正在初始化{app_name}应用程序...")
 
+            # 初始化处理器
             if not self.handler.initialize():
-                self.finished.emit(False, "Word应用程序初始化失败")
+                self.finished.emit(False, f"{app_name}应用程序初始化失败")
                 return
 
-            self.log_signal.emit(f"正在打开文档: {self.word_file}")
-
-            if not self.handler.open_document(self.word_file):
-                self.finished.emit(False, "无法打开Word文档或文档不包含VBA代码")
-                return
+            # 打开文档/工作簿/演示文稿
+            self.log_signal.emit(f"正在打开文件: {self.office_file}")
+            
+            if self.file_type == FileType.WORD:
+                if not self.handler.open_document(self.office_file):
+                    self.finished.emit(False, f"无法打开{app_name}文档或文档不包含VBA代码")
+                    return
+            elif self.file_type == FileType.EXCEL:
+                if not self.handler.open_workbook(self.office_file):
+                    self.finished.emit(False, f"无法打开{app_name}工作簿或工作簿不包含VBA代码")
+                    return
+            elif self.file_type == FileType.POWERPOINT:
+                if not self.handler.open_presentation(self.office_file):
+                    self.finished.emit(False, f"无法打开{app_name}演示文稿或演示文稿不包含VBA代码")
+                    return
 
             if self.task_type == 'export':
                 self._do_export()
@@ -55,7 +69,12 @@ class WorkerThread(QThread):
             self.finished.emit(False, f"操作失败: {str(e)}")
         finally:
             if self.handler:
-                self.handler.close_document()
+                if self.file_type == FileType.WORD:
+                    self.handler.close_document()
+                elif self.file_type == FileType.EXCEL:
+                    self.handler.close_workbook()
+                elif self.file_type == FileType.POWERPOINT:
+                    self.handler.close_presentation()
                 self.handler.quit()
 
     def _do_export(self):
@@ -82,9 +101,10 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.word_file = ""
+        self.office_file = ""
         self.vba_folder = ""
-        self.document_components = []  # Word文档中的VBA组件
+        self.file_type = FileType.WORD  # 默认文件类型
+        self.document_components = []  # 文档中的VBA组件
         self.folder_components = []    # 文件夹中的VBA组件
         self.worker_thread = None
 
@@ -95,8 +115,8 @@ class MainWindow(QMainWindow):
 
     def init_ui(self):
         """初始化UI"""
-        self.setWindowTitle("VBA导入工具")
-        self.setGeometry(100, 100, 800, 700)
+        self.setWindowTitle("VBA导入工具 - 支持 Word/Excel/PPT")
+        self.setGeometry(100, 100, 850, 700)
 
         # 创建中央部件
         central_widget = QWidget()
@@ -121,9 +141,13 @@ class MainWindow(QMainWindow):
         line.setFrameShadow(QFrame.Sunken)
         main_layout.addWidget(line)
 
-        # Word文件选择区
-        word_group = self._create_word_file_section()
-        main_layout.addWidget(word_group)
+        # 文件类型选择区
+        file_type_group = self._create_file_type_section()
+        main_layout.addWidget(file_type_group)
+
+        # Office文件选择区
+        office_file_group = self._create_office_file_section()
+        main_layout.addWidget(office_file_group)
 
         # VBA文件夹选择区
         folder_group = self._create_folder_section()
@@ -144,21 +168,46 @@ class MainWindow(QMainWindow):
         # 状态栏
         self.statusBar().showMessage("就绪")
 
-    def _create_word_file_section(self):
-        """创建Word文件选择区域"""
-        group = QGroupBox("Word文件")
+    def _create_file_type_section(self):
+        """创建文件类型选择区域"""
+        group = QGroupBox("文件类型")
         layout = QHBoxLayout()
 
-        self.word_file_label = QLabel("未选择文件")
-        self.word_file_label.setMinimumWidth(400)
-        self.word_file_label.setStyleSheet("color: gray;")
+        layout.addWidget(QLabel("选择Office应用:"))
 
-        self.btn_select_word = QPushButton("选择Word文件")
-        self.btn_select_word.clicked.connect(self.select_word_file)
+        self.file_type_combo = QComboBox()
+        self.file_type_combo.addItem("Word", FileType.WORD)
+        self.file_type_combo.addItem("Excel", FileType.EXCEL)
+        self.file_type_combo.addItem("PowerPoint", FileType.POWERPOINT)
+        self.file_type_combo.currentIndexChanged.connect(self.on_file_type_changed)
 
-        layout.addWidget(QLabel("Word文件:"))
-        layout.addWidget(self.word_file_label, 1)
-        layout.addWidget(self.btn_select_word)
+        layout.addWidget(self.file_type_combo)
+        layout.addStretch()
+
+        # 添加说明标签
+        info_label = QLabel("选择要处理的Office文件类型")
+        info_label.setStyleSheet("color: gray; font-size: 9pt;")
+        layout.addWidget(info_label)
+
+        group.setLayout(layout)
+        return group
+
+    def _create_office_file_section(self):
+        """创建Office文件选择区域"""
+        group = QGroupBox("Office文件")
+        layout = QHBoxLayout()
+
+        self.office_file_label = QLabel("未选择文件")
+        self.office_file_label.setMinimumWidth(400)
+        self.office_file_label.setStyleSheet("color: gray;")
+
+        self.btn_select_file = QPushButton("选择文件")
+        self.btn_select_file.clicked.connect(self.select_office_file)
+
+        self.file_type_label = QLabel("Word文件:")
+        layout.addWidget(self.file_type_label)
+        layout.addWidget(self.office_file_label, 1)
+        layout.addWidget(self.btn_select_file)
 
         group.setLayout(layout)
         return group
@@ -255,20 +304,47 @@ class MainWindow(QMainWindow):
         group.setLayout(layout)
         return group
 
-    def select_word_file(self):
-        """选择Word文件"""
+    def on_file_type_changed(self, index):
+        """文件类型改变时的处理"""
+        self.file_type = self.file_type_combo.currentData()
+        
+        # 更新标签
+        file_names = {
+            FileType.WORD: "Word文件:",
+            FileType.EXCEL: "Excel工作簿:",
+            FileType.POWERPOINT: "PowerPoint演示文稿:"
+        }
+        self.file_type_label.setText(file_names[self.file_type])
+        
+        # 清空已选择的文件
+        self.office_file = ""
+        self.office_file_label.setText("未选择文件")
+        self.office_file_label.setStyleSheet("color: gray;")
+        
+        # 清空组件列表
+        self.components_list.clear()
+        self.document_components = []
+        self.folder_components = []
+        
+        self._update_buttons_state()
+        self.logger.info(f"已切换到{VBAHandlerFactory.get_file_type_name(self.file_type)}模式")
+
+    def select_office_file(self):
+        """选择Office文件"""
+        file_filter = VBAHandlerFactory.get_file_filter(self.file_type)
+        
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "选择Word文件",
+            f"选择{VBAHandlerFactory.get_file_type_name(self.file_type)}文件",
             "",
-            "Word文件 (*.docm *.doc);;所有文件 (*.*)"
+            file_filter
         )
 
         if file_path:
-            self.word_file = file_path
-            self.word_file_label.setText(file_path)
-            self.word_file_label.setStyleSheet("color: black;")
-            self.logger.info(f"已选择Word文件: {file_path}")
+            self.office_file = file_path
+            self.office_file_label.setText(file_path)
+            self.office_file_label.setStyleSheet("color: black;")
+            self.logger.info(f"已选择文件: {file_path}")
             self.btn_refresh.setEnabled(True)
             self._update_buttons_state()
             self.refresh_components()
@@ -291,14 +367,14 @@ class MainWindow(QMainWindow):
 
     def _update_buttons_state(self):
         """更新按钮状态"""
-        has_word_file = bool(self.word_file)
+        has_office_file = bool(self.office_file)
         has_vba_folder = bool(self.vba_folder)
 
-        # 导出需要Word文件
-        self.btn_export.setEnabled(has_word_file)
+        # 导出需要Office文件
+        self.btn_export.setEnabled(has_office_file)
 
-        # 导入需要Word文件和VBA文件夹
-        self.btn_import.setEnabled(has_word_file and has_vba_folder)
+        # 导入需要Office文件和VBA文件夹
+        self.btn_import.setEnabled(has_office_file and has_vba_folder)
 
     def refresh_components(self):
         """刷新组件列表"""
@@ -306,9 +382,9 @@ class MainWindow(QMainWindow):
         self.document_components = []
         self.folder_components = []
 
-        # 读取Word文档中的VBA组件
-        if self.word_file and os.path.exists(self.word_file):
-            self._load_word_components()
+        # 读取Office文档中的VBA组件
+        if self.office_file and os.path.exists(self.office_file):
+            self._load_document_components()
 
         # 读取VBA文件夹中的组件
         if self.vba_folder and os.path.exists(self.vba_folder):
@@ -316,23 +392,44 @@ class MainWindow(QMainWindow):
 
         self._display_components()
 
-    def _load_word_components(self):
-        """加载Word文档中的VBA组件"""
+    def _load_document_components(self):
+        """加载Office文档中的VBA组件"""
         try:
-            self.logger.info("正在读取Word文档中的VBA组件...")
-            handler = WordVBAHandler()
+            app_name = VBAHandlerFactory.get_file_type_name(self.file_type)
+            self.logger.info(f"正在读取{app_name}文档中的VBA组件...")
+            
+            handler = VBAHandlerFactory.get_handler(self.file_type)
 
             if not handler.initialize():
-                self.logger.error("Word应用程序初始化失败")
+                self.logger.error(f"{app_name}应用程序初始化失败")
                 return
 
-            if not handler.open_document(self.word_file):
-                self.logger.warning("无法打开文档或文档不包含VBA代码")
-                handler.quit()
-                return
+            # 根据文件类型调用不同的打开方法
+            if self.file_type == FileType.WORD:
+                if not handler.open_document(self.office_file):
+                    self.logger.warning("无法打开文档或文档不包含VBA代码")
+                    handler.quit()
+                    return
+            elif self.file_type == FileType.EXCEL:
+                if not handler.open_workbook(self.office_file):
+                    self.logger.warning("无法打开工作簿或工作簿不包含VBA代码")
+                    handler.quit()
+                    return
+            elif self.file_type == FileType.POWERPOINT:
+                if not handler.open_presentation(self.office_file):
+                    self.logger.warning("无法打开演示文稿或演示文稿不包含VBA代码")
+                    handler.quit()
+                    return
 
             self.document_components = handler.get_vba_components()
-            handler.close_document()
+            
+            # 关闭文档并退出
+            if self.file_type == FileType.WORD:
+                handler.close_document()
+            elif self.file_type == FileType.EXCEL:
+                handler.close_workbook()
+            elif self.file_type == FileType.POWERPOINT:
+                handler.close_presentation()
             handler.quit()
 
             self.logger.info(f"发现 {len(self.document_components)} 个VBA组件")
@@ -344,6 +441,8 @@ class MainWindow(QMainWindow):
         """加载VBA文件夹中的组件"""
         try:
             self.logger.info("正在读取VBA文件夹中的组件...")
+            # 复用 word_handler 中的 scan_vba_folder 函数
+            from core.word_handler import scan_vba_folder
             self.folder_components = scan_vba_folder(self.vba_folder)
             self.logger.info(f"发现 {len(self.folder_components)} 个VBA文件")
         except Exception as e:
@@ -352,17 +451,19 @@ class MainWindow(QMainWindow):
     def _display_components(self):
         """显示组件列表"""
         self.components_list.clear()
+        
+        app_name = VBAHandlerFactory.get_file_type_name(self.file_type)
 
-        # 显示Word文档中的组件
+        # 显示文档中的组件
         if self.document_components:
-            header_item = QListWidgetItem("=== Word文档中的VBA组件 ===")
+            header_item = QListWidgetItem(f"=== {app_name}文档中的VBA组件 ===")
             header_item.setFlags(Qt.NoItemFlags)
             header_item.setBackground(Qt.lightGray)
             self.components_list.addItem(header_item)
 
             for comp in self.document_components:
                 item = QListWidgetItem(comp.display_name)
-                item.setData(Qt.UserRole, ('word', comp))
+                item.setData(Qt.UserRole, ('document', comp))
                 item.setCheckState(Qt.Checked)
                 self.components_list.addItem(item)
 
@@ -381,7 +482,7 @@ class MainWindow(QMainWindow):
 
     def get_selected_components(self):
         """获取选中的组件"""
-        selected = {'word': [], 'folder': []}
+        selected = {'document': [], 'folder': []}
 
         for i in range(self.components_list.count()):
             item = self.components_list.item(i)
@@ -396,7 +497,7 @@ class MainWindow(QMainWindow):
     def export_vba(self):
         """导出VBA"""
         selected = self.get_selected_components()
-        components_to_export = selected['word']
+        components_to_export = selected['document']
 
         if not components_to_export:
             QMessageBox.warning(self, "警告", "没有选择要导出的组件")
@@ -436,8 +537,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "警告", "没有选择要导入的组件")
             return
 
-        if not self.word_file:
-            QMessageBox.warning(self, "警告", "请先选择Word文件")
+        if not self.office_file:
+            QMessageBox.warning(self, "警告", "请先选择Office文件")
             return
 
         # 显示确认对话框
@@ -448,9 +549,10 @@ class MainWindow(QMainWindow):
 
         # 构建组件列表
         component_list = "\n".join([f"• {c.display_name}" for c in components_to_import])
+        app_name = VBAHandlerFactory.get_file_type_name(self.file_type)
         msg.setInformativeText(
             f"导入组件:\n{component_list}\n\n"
-            f"目标文档: {self.word_file}"
+            f"目标文档: {self.office_file} ({app_name})"
         )
         msg.addButton("确认", QMessageBox.AcceptRole)
         msg.addButton("取消", QMessageBox.RejectRole)
@@ -467,8 +569,9 @@ class MainWindow(QMainWindow):
 
         self.worker_thread = WorkerThread(
             task_type,
-            self.word_file,
+            self.office_file,
             self.vba_folder,
+            self.file_type,
             components
         )
         self.worker_thread.log_signal.connect(self._on_log)
@@ -496,18 +599,18 @@ class MainWindow(QMainWindow):
 
     def _set_buttons_enabled(self, enabled):
         """设置按钮启用状态"""
-        self.btn_select_word.setEnabled(enabled)
+        self.btn_select_file.setEnabled(enabled)
         self.btn_select_folder.setEnabled(enabled)
-        self.btn_refresh.setEnabled(enabled and bool(self.word_file))
-        self.btn_export.setEnabled(enabled and bool(self.word_file))
-        self.btn_import.setEnabled(enabled and bool(self.word_file) and bool(self.vba_folder))
+        self.btn_refresh.setEnabled(enabled and bool(self.office_file))
+        self.btn_export.setEnabled(enabled and bool(self.office_file))
+        self.btn_import.setEnabled(enabled and bool(self.office_file) and bool(self.vba_folder))
+        self.file_type_combo.setEnabled(enabled)
 
         if not enabled:
             self.statusBar().showMessage("正在处理...")
 
     def closeEvent(self, event):
         """窗口关闭事件"""
-        # 确保关闭Word进程
         self.logger.info("程序退出")
         event.accept()
 
