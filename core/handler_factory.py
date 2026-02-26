@@ -31,25 +31,26 @@ class VBAHandlerFactory:
     }
     
     @staticmethod
-    def get_handler(file_type: FileType):
+    def get_handler(file_type: FileType, use_ui_signal: bool = True):
         """
         根据文件类型获取对应的VBA处理器
-        
+
         Args:
             file_type: Office文件类型
-            
+            use_ui_signal: 是否使用UI信号（后台线程应设为False）
+
         Returns:
             对应的VBA处理器实例
         """
         if file_type == FileType.WORD:
             from core.word_handler import WordVBAHandler
-            return WordVBAHandler()
+            return WordVBAHandler(use_ui_signal=use_ui_signal)
         elif file_type == FileType.EXCEL:
             from core.excel_handler import ExcelVBAHandler
-            return ExcelVBAHandler()
+            return ExcelVBAHandler(use_ui_signal=use_ui_signal)
         elif file_type == FileType.POWERPOINT:
             from core.ppt_handler import PowerPointVBAHandler
-            return PowerPointVBAHandler()
+            return PowerPointVBAHandler(use_ui_signal=use_ui_signal)
         else:
             raise ValueError(f"不支持的文件类型: {file_type}")
     

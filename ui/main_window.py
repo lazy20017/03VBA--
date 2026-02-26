@@ -18,6 +18,73 @@ from core.vba_component import VBAComponent
 from utils.logger import setup_logger, get_logger
 
 
+class RefreshWorkerThread(QThread):
+    """专门用于刷新组件列表的后台线程"""
+    finished = pyqtSignal(list, str)  # (components, error_message)
+    log_signal = pyqtSignal(str)
+
+    def __init__(self, office_file, file_type):
+        super().__init__()
+        self.office_file = office_file
+        self.file_type = file_type
+
+    def run(self):
+        components = []
+        error_msg = ""
+        try:
+            self.log_signal.emit("开始读取VBA组件...")
+            handler = VBAHandlerFactory.get_handler(self.file_type, use_ui_signal=False)
+
+            if not handler.initialize():
+                error_msg = "应用程序初始化失败"
+                self.log_signal.emit(error_msg)
+                return
+
+            self.log_signal.emit(f"正在打开文件: {self.office_file}")
+
+            # 根据文件类型打开文档
+            if self.file_type == FileType.WORD:
+                if not handler.open_document(self.office_file):
+                    error_msg = "无法打开文档或文档不包含VBA代码"
+                    self.log_signal.emit(error_msg)
+                    handler.quit()
+                    return
+            elif self.file_type == FileType.EXCEL:
+                if not handler.open_workbook(self.office_file):
+                    error_msg = "无法打开工作簿或工作簿不包含VBA代码"
+                    self.log_signal.emit(error_msg)
+                    handler.quit()
+                    return
+            elif self.file_type == FileType.POWERPOINT:
+                if not handler.open_presentation(self.office_file):
+                    error_msg = "无法打开演示文稿或演示文稿不包含VBA代码"
+                    self.log_signal.emit(error_msg)
+                    handler.quit()
+                    return
+
+            self.log_signal.emit("正在读取VBA组件...")
+            components = handler.get_vba_components()
+
+            # 关闭文档并退出
+            if self.file_type == FileType.WORD:
+                handler.close_document()
+            elif self.file_type == FileType.EXCEL:
+                handler.close_workbook()
+            elif self.file_type == FileType.POWERPOINT:
+                handler.close_presentation()
+            handler.quit()
+
+            self.log_signal.emit(f"成功读取 {len(components)} 个组件")
+
+        except Exception as e:
+            import traceback
+            error_msg = f"读取VBA组件失败: {str(e)}"
+            self.log_signal.emit(error_msg)
+            self.log_signal.emit(traceback.format_exc())
+
+        self.finished.emit(components, error_msg)
+
+
 class WorkerThread(QThread):
     """后台工作线程"""
     finished = pyqtSignal(bool, str)
@@ -26,7 +93,7 @@ class WorkerThread(QThread):
 
     def __init__(self, task_type, office_file, vba_folder, file_type, components=None):
         super().__init__()
-        self.task_type = task_type  # 'export' or 'import'
+        self.task_type = task_type  # 'export', 'import' or 'remove'
         self.office_file = office_file
         self.vba_folder = vba_folder
         self.file_type = file_type
@@ -34,23 +101,41 @@ class WorkerThread(QThread):
         self.handler = None
 
     def run(self):
+        print("[WorkerThread] run() 方法开始执行")
+        import traceback
         try:
-            self.handler = VBAHandlerFactory.get_handler(self.file_type)
+            print("[WorkerThread] 正在获取handler...")
+            self.log_signal.emit("WorkerThread 开始执行...")
+            self.handler = VBAHandlerFactory.get_handler(self.file_type, use_ui_signal=False)
+            print(f"[WorkerThread] handler: {type(self.handler)}")
+            self.log_signal.emit(f"Handler 创建成功: {type(self.handler)}")
+            
+            print("[WorkerThread] 准备调用 handler.initialize()")
+            # 暂时跳过信号连接测试
+            # if hasattr(self.handler, 'log_signal'):
+            #     print("[WorkerThread] 连接 log_signal")
+            #     self.handler.log_signal.connect(self._on_log)
+            #     print("[WorkerThread] log_signal 连接完成")
+            
             app_name = VBAHandlerFactory.get_file_type_name(self.file_type)
+            print(f"[WorkerThread] app_name: {app_name}, file_type: {self.file_type}")
             self.log_signal.emit(f"正在初始化{app_name}应用程序...")
 
+            print("[WorkerThread] 调用 handler.initialize()")
             # 初始化处理器
             if not self.handler.initialize():
                 self.finished.emit(False, f"{app_name}应用程序初始化失败")
                 return
 
-            # 打开文档/工作簿/演示文稿
+            print("[WorkerThread] initialize 成功，准备打开文档")
             self.log_signal.emit(f"正在打开文件: {self.office_file}")
             
             if self.file_type == FileType.WORD:
+                print(f"[WorkerThread] 准备打开Word文档: {self.office_file}")
                 if not self.handler.open_document(self.office_file):
                     self.finished.emit(False, f"无法打开{app_name}文档或文档不包含VBA代码")
                     return
+                print("[WorkerThread] Word文档打开成功")
             elif self.file_type == FileType.EXCEL:
                 if not self.handler.open_workbook(self.office_file):
                     self.finished.emit(False, f"无法打开{app_name}工作簿或工作簿不包含VBA代码")
@@ -60,22 +145,35 @@ class WorkerThread(QThread):
                     self.finished.emit(False, f"无法打开{app_name}演示文稿或演示文稿不包含VBA代码")
                     return
 
+            self.log_signal.emit(f"文档已打开，准备执行 {self.task_type} 任务...")
+            
             if self.task_type == 'export':
                 self._do_export()
             elif self.task_type == 'import':
                 self._do_import()
+            elif self.task_type == 'remove':
+                self._do_remove()
 
         except Exception as e:
-            self.finished.emit(False, f"操作失败: {str(e)}")
+            import traceback
+            error_detail = traceback.format_exc()
+            self.log_signal.emit(f"WorkerThread异常: {str(e)}")
+            self.log_signal.emit(f"堆栈: {error_detail}")
+            self.finished.emit(False, f"操作失败: {str(e)}\n{error_detail}")
         finally:
+            self.log_signal.emit("WorkerThread 进入清理阶段...")
             if self.handler:
-                if self.file_type == FileType.WORD:
-                    self.handler.close_document()
-                elif self.file_type == FileType.EXCEL:
-                    self.handler.close_workbook()
-                elif self.file_type == FileType.POWERPOINT:
-                    self.handler.close_presentation()
-                self.handler.quit()
+                try:
+                    if self.file_type == FileType.WORD:
+                        self.handler.close_document()
+                    elif self.file_type == FileType.EXCEL:
+                        self.handler.close_workbook()
+                    elif self.file_type == FileType.POWERPOINT:
+                        self.handler.close_presentation()
+                    self.handler.quit()
+                except Exception as e:
+                    self.log_signal.emit(f"清理时出错: {e}")
+            self.log_signal.emit("WorkerThread 清理完成")
 
     def _do_export(self):
         """执行导出操作"""
@@ -95,6 +193,19 @@ class WorkerThread(QThread):
         else:
             self.finished.emit(False, "导入失败")
 
+    def _do_remove(self):
+        """执行清除VBA操作"""
+        self.log_signal.emit("正在清除所有VBA代码...")
+        success = self.handler.remove_all_vba()
+        if success:
+            self.finished.emit(True, "成功清除所有VBA代码")
+        else:
+            self.finished.emit(False, "清除VBA失败")
+
+    def _on_log(self, msg):
+        """处理日志消息"""
+        print(f"[Handler] {msg}")
+
 
 class MainWindow(QMainWindow):
     """主窗口类"""
@@ -106,7 +217,8 @@ class MainWindow(QMainWindow):
         self.file_type = FileType.WORD  # 默认文件类型
         self.document_components = []  # 文档中的VBA组件
         self.folder_components = []    # 文件夹中的VBA组件
-        self.worker_thread = None
+        self.worker_thread = None       # 用于导出/导入/清除操作
+        self.refresh_worker = None      # 用于刷新组件列表
 
         # 初始化日志
         self.logger = None
@@ -271,9 +383,29 @@ class MainWindow(QMainWindow):
         self.btn_import.setMinimumHeight(40)
         self.btn_import.setEnabled(False)
 
+        self.btn_remove = QPushButton("清除VBA")
+        self.btn_remove.clicked.connect(self.remove_vba)
+        self.btn_remove.setMinimumHeight(40)
+        self.btn_remove.setEnabled(False)
+        self.btn_remove.setStyleSheet("""
+            QPushButton {
+                background-color: #e74c3c;
+                color: white;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #c0392b;
+            }
+            QPushButton:disabled {
+                background-color: #bdc3c7;
+                color: #7f8c8d;
+            }
+        """)
+
         layout.addStretch()
         layout.addWidget(self.btn_export)
         layout.addWidget(self.btn_import)
+        layout.addWidget(self.btn_remove)
 
         group.setLayout(layout)
         return group
@@ -376,66 +508,63 @@ class MainWindow(QMainWindow):
         # 导入需要Office文件和VBA文件夹
         self.btn_import.setEnabled(has_office_file and has_vba_folder)
 
+        # 清除VBA只需要Office文件
+        self.btn_remove.setEnabled(has_office_file)
+
     def refresh_components(self):
         """刷新组件列表"""
+        # 先清空显示
         self.components_list.clear()
         self.document_components = []
         self.folder_components = []
 
-        # 读取Office文档中的VBA组件
-        if self.office_file and os.path.exists(self.office_file):
-            self._load_document_components()
-
-        # 读取VBA文件夹中的组件
+        # 读取VBA文件夹中的组件（这个可以在主线程完成）
         if self.vba_folder and os.path.exists(self.vba_folder):
             self._load_folder_components()
+
+        # 读取Office文档中的VBA组件（使用后台线程）
+        if self.office_file and os.path.exists(self.office_file):
+            self._load_document_components_threaded()
+
+    def _load_document_components_threaded(self):
+        """使用后台线程加载Office文档中的VBA组件"""
+        self._set_buttons_enabled(False)
+        self.logger.info("正在读取VBA组件...")
+
+        try:
+            self.refresh_worker = RefreshWorkerThread(
+                self.office_file,
+                self.file_type
+            )
+            self.refresh_worker.log_signal.connect(self._on_refresh_log)
+            self.refresh_worker.finished.connect(self._on_refresh_finished)
+            self.refresh_worker.start()
+        except Exception as e:
+            import traceback
+            self.logger.error(f"启动刷新线程失败: {e}")
+            self.logger.error(traceback.format_exc())
+            self._set_buttons_enabled(True)
+
+    def _on_refresh_log(self, message):
+        """处理刷新线程的日志"""
+        self.logger.info(message)
+
+    def _on_refresh_finished(self, components, error_msg):
+        """处理刷新线程完成"""
+        self._set_buttons_enabled(True)
+
+        if error_msg:
+            self.logger.error(error_msg)
+        else:
+            self.document_components = components
+            self.logger.info(f"成功读取 {len(components)} 个VBA组件")
 
         self._display_components()
 
     def _load_document_components(self):
-        """加载Office文档中的VBA组件"""
-        try:
-            app_name = VBAHandlerFactory.get_file_type_name(self.file_type)
-            self.logger.info(f"正在读取{app_name}文档中的VBA组件...")
-            
-            handler = VBAHandlerFactory.get_handler(self.file_type)
-
-            if not handler.initialize():
-                self.logger.error(f"{app_name}应用程序初始化失败")
-                return
-
-            # 根据文件类型调用不同的打开方法
-            if self.file_type == FileType.WORD:
-                if not handler.open_document(self.office_file):
-                    self.logger.warning("无法打开文档或文档不包含VBA代码")
-                    handler.quit()
-                    return
-            elif self.file_type == FileType.EXCEL:
-                if not handler.open_workbook(self.office_file):
-                    self.logger.warning("无法打开工作簿或工作簿不包含VBA代码")
-                    handler.quit()
-                    return
-            elif self.file_type == FileType.POWERPOINT:
-                if not handler.open_presentation(self.office_file):
-                    self.logger.warning("无法打开演示文稿或演示文稿不包含VBA代码")
-                    handler.quit()
-                    return
-
-            self.document_components = handler.get_vba_components()
-            
-            # 关闭文档并退出
-            if self.file_type == FileType.WORD:
-                handler.close_document()
-            elif self.file_type == FileType.EXCEL:
-                handler.close_workbook()
-            elif self.file_type == FileType.POWERPOINT:
-                handler.close_presentation()
-            handler.quit()
-
-            self.logger.info(f"发现 {len(self.document_components)} 个VBA组件")
-
-        except Exception as e:
-            self.logger.error(f"读取VBA组件失败: {e}")
+        """加载Office文档中的VBA组件（已弃用，使用_load_document_components_threaded）"""
+        # 此方法已不再使用，所有操作已移至后台线程
+        pass
 
     def _load_folder_components(self):
         """加载VBA文件夹中的组件"""
@@ -563,20 +692,64 @@ class MainWindow(QMainWindow):
         # 执行导入
         self._run_task('import', components_to_import)
 
+    def remove_vba(self):
+        """清除VBA"""
+        if not self.office_file:
+            QMessageBox.warning(self, "警告", "请先选择Office文件")
+            return
+
+        # 显示确认对话框
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Warning)
+        msg.setWindowTitle("确认清除VBA")
+        msg.setText("确定要清除文档中的所有VBA代码吗？")
+
+        app_name = VBAHandlerFactory.get_file_type_name(self.file_type)
+        msg.setInformativeText(
+            f"此操作将删除 {app_name} 文档中的所有VBA代码，且无法恢复！\n\n"
+            f"文件: {self.office_file}"
+        )
+        msg.addButton("确认清除", QMessageBox.AcceptRole)
+        msg.addButton("取消", QMessageBox.RejectRole)
+
+        if msg.exec_() != QMessageBox.AcceptRole:
+            return
+
+        # 执行清除
+        self._run_task('remove', [])
+
     def _run_task(self, task_type, components):
         """执行后台任务"""
+        # 检查是否有其他操作正在进行
+        if self.worker_thread and self.worker_thread.isRunning():
+            QMessageBox.warning(self, "警告", "当前有其他操作正在进行，请等待完成后再执行新操作")
+            return
+
         self._set_buttons_enabled(False)
 
-        self.worker_thread = WorkerThread(
-            task_type,
-            self.office_file,
-            self.vba_folder,
-            self.file_type,
-            components
-        )
-        self.worker_thread.log_signal.connect(self._on_log)
-        self.worker_thread.finished.connect(self._on_task_finished)
-        self.worker_thread.start()
+        self.logger.info(f"创建WorkerThread，task_type={task_type}")
+        
+        try:
+            self.worker_thread = WorkerThread(
+                task_type,
+                self.office_file,
+                self.vba_folder,
+                self.file_type,
+                components
+            )
+            self.logger.info("WorkerThread创建成功，连接信号...")
+            self.worker_thread.log_signal.connect(self._on_log)
+            self.worker_thread.finished.connect(self._on_task_finished)
+            self.logger.info("信号连接成功，启动线程...")
+            self.worker_thread.start()
+            self.logger.info("WorkerThread已启动")
+        except Exception as e:
+            import traceback
+            error_detail = traceback.format_exc()
+            self.logger.error(f"创建或启动线程失败: {e}")
+            self.logger.error(f"堆栈: {error_detail}")
+            self._set_buttons_enabled(True)
+            QMessageBox.critical(self, "错误", f"启动任务失败: {e}\n{error_detail}")
 
         self.logger.info(f"开始执行{task_type}任务...")
 
@@ -604,6 +777,7 @@ class MainWindow(QMainWindow):
         self.btn_refresh.setEnabled(enabled and bool(self.office_file))
         self.btn_export.setEnabled(enabled and bool(self.office_file))
         self.btn_import.setEnabled(enabled and bool(self.office_file) and bool(self.vba_folder))
+        self.btn_remove.setEnabled(enabled and bool(self.office_file))
         self.file_type_combo.setEnabled(enabled)
 
         if not enabled:

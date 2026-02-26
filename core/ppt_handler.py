@@ -414,3 +414,154 @@ class PowerPointVBAHandler:
         except Exception as e:
             self.logger.error(f"更新组件失败: {e}")
             raise
+
+    def _clear_document_properties(self):
+        """
+        清除演示文稿自定义属性（学号、密码等锁定信息）
+        以及内置属性（主题、作者、公司等）
+        """
+        if not self.presentation:
+            return
+        
+        try:
+            # 清除自定义属性
+            try:
+                props = self.presentation.CustomDocumentProperties
+                if props and props.Count > 0:
+                    count = props.Count
+                    self.logger.info(f"发现 {count} 个自定义属性，准备清除...")
+                    for i in range(count, 0, -1):
+                        try:
+                            prop = props(i)
+                            self.logger.info(f"删除自定义属性: {prop.Name}")
+                            prop.Delete()
+                        except Exception as e:
+                            self.logger.debug(f"删除属性 {i} 失败: {e}")
+                            pass
+                else:
+                    self.logger.info("没有自定义属性需要清除")
+            except Exception as e:
+                self.logger.warning(f"访问自定义属性失败: {e}")
+            
+            # 清除内置属性（主题、作者、公司等）
+            builtin_props_to_clear = [
+                "Title",           # 标题
+                "Subject",         # 主题
+                "Author",         # 作者
+                "Keywords",       # 关键字
+                "Comments",       # 备注
+                "Company",        # 公司
+                "Manager",        # 管理者
+                "Last Author",    # 最后作者
+                "Revision Number",# 修订号
+                "Application Name",# 应用程序名称
+                "Last Save By",   # 上次保存者（可能包含账号信息）
+                "Total Time",     # 总编辑时间
+            ]
+            
+            try:
+                builtin_props = self.presentation.BuiltInDocumentProperties
+                for prop_name in builtin_props_to_clear:
+                    try:
+                        builtin_props.Item(prop_name).Value = ""
+                    except:
+                        pass
+            except Exception as e:
+                self.logger.warning(f"清除内置属性失败: {e}")
+            
+            # 解除演示文稿保护
+            try:
+                self.presentation.Unprotect()
+            except:
+                pass
+            try:
+                self.presentation.Unprotect(Password="teacher2024")
+            except:
+                pass
+            try:
+                self.presentation.Unprotect(Password="StudentReadOnly2024")
+            except:
+                pass
+            try:
+                self.presentation.Unprotect(Password="NoSelect2024")
+            except:
+                pass
+            try:
+                self.presentation.Unprotect(Password="TempProtect2024")
+            except:
+                pass
+            
+            self.logger.info("演示文稿属性已清除")
+            
+        except Exception as e:
+            self.logger.warning(f"清除文档属性时出错: {e}")
+            import traceback
+            self.logger.warning(traceback.format_exc())
+
+    def remove_all_vba(self) -> bool:
+        """
+        删除演示文稿中所有VBA代码，同时清除文档属性
+
+        Returns:
+            是否删除成功
+        """
+        try:
+            # 先清除文档属性
+            self.logger.info("第一步：清除文档属性...")
+            try:
+                self._clear_document_properties()
+                self.logger.info("文档属性清除完成")
+            except Exception as e:
+                self.logger.warning(f"清除文档属性失败: {e}")
+            
+            if not self.vba_project:
+                self.logger.warning("没有VBA工程，文档属性已清除")
+                return True
+
+            # 收集所有组件的名称
+            component_names = []
+            for component in self.vba_project.VBComponents:
+                component_names.append(component.Name)
+
+            self.logger.info(f"发现 {len(component_names)} 个VBA组件: {', '.join(component_names)}")
+
+            # 清除 ThisPresentation 的代码
+            if "ThisPresentation" in component_names:
+                try:
+                    ppt_module = self.vba_project.VBComponents("ThisPresentation")
+                    code_module = ppt_module.CodeModule
+                    if code_module.CountOfLines > 0:
+                        code_module.DeleteLines(1, code_module.CountOfLines)
+                    self.logger.info("已清除 ThisPresentation 模块代码")
+                    component_names.remove("ThisPresentation")
+                except Exception as e:
+                    self.logger.warning(f"清除 ThisPresentation 代码失败: {e}")
+
+            # 删除其他组件
+            for name in component_names:
+                try:
+                    component = self.vba_project.VBComponents(name)
+                    self.vba_project.VBComponents.Remove(component)
+                    self.logger.info(f"已删除VBA组件: {name}")
+                except Exception as e:
+                    self.logger.warning(f"删除组件失败: {name} - {e}")
+
+            # 保存演示文稿
+            if self.presentation:
+                file_path = self.presentation.FullName
+                if file_path.lower().endswith('.ppt') and not file_path.lower().endswith('.pptm'):
+                    new_path = file_path[:-4] + '.pptm'
+                    self.presentation.SaveAs(new_path, 24)
+                    self.logger.info(f"演示文稿已保存为宏启用格式: {new_path}")
+                else:
+                    self.presentation.Save()
+                    self.logger.info("演示文稿已保存")
+
+            self.logger.info("已清除所有VBA代码")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"清除VBA代码失败: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            return False

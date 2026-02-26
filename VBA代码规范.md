@@ -13,33 +13,31 @@
 
 ## 2. 事件命名规范
 
-### 2.1 文档事件（ThisDocument）
+### 2.1 文档事件（必须放在 ThisDocument 中）
 
 ```vb
-' 文档打开时执行
+' 文档打开时执行（放在 ThisDocument.bas 中）
 Private Sub Document_Open()
-    ' 文档打开时的处理逻辑
-End Sub
-
-' 另一种文档打开事件（兼容性更好）
-Private Sub AutoOpen()
-    ' 文档打开时的处理逻辑
+    On Error Resume Next
+    Call MainProcedure    ' 调用标准模块中的过程
+    If Err.Number <> 0 Then
+        Debug.Print "错误: " & Err.Description
+    End If
+    On Error GoTo 0
 End Sub
 ```
 
-**注意**：
-- `Document_Open` 和 `AutoOpen` 只需保留一个，建议使用 `Document_Open`
-- 不要在事件中使用 `Application.OnTime` 延迟执行，可能导致类型错误
-- 使用 `On Error Resume Next` 添加错误处理
+**⚠️ 重要规则**：
+- `Document_Open`、`AutoOpen`、`Document_Close` 等文档事件**必须放在 `ThisDocument.bas` 中**
+- 标准模块(.bas)不能处理文档事件，事件不会被Word自动触发
+- 标准模块中应定义公共过程供 ThisDocument 调用
 
-### 2.2 工作簿/文档事件
+### 2.2 其他文档事件
 
 | 事件 | 触发时机 |
 |-----|---------|
 | `Document_Open` | 文档打开时 |
-| `AutoOpen` | 文档打开时（兼容性更好） |
 | `Document_Close` | 文档关闭前 |
-| `AutoClose` | 文档关闭前 |
 | `NewDocument` | 新建文档时 |
 
 ---
@@ -52,7 +50,6 @@ End Sub
 ' ===============================
 ' 模块名称: LoginModule
 ' 功能描述: 处理用户登录验证
-' 创建日期: 2024-01-01
 ' ===============================
 
 Option Explicit
@@ -63,21 +60,11 @@ Option Explicit
 Dim m_LoginAttempts As Integer
 
 ' --------------------------------
-' 公共过程
+' 公共过程（供 ThisDocument 调用）
 ' --------------------------------
 
-' 文档打开时自动运行
-Sub Document_Open()
-    On Error Resume Next
-    ShowLoginForm
-    If Err.Number <> 0 Then
-        MsgBox "启动登录失败: " & Err.Description, vbCritical, "错误"
-    End If
-    On Error GoTo 0
-End Sub
-
 ' 显示登录窗体
-Sub ShowLoginForm()
+Public Sub ShowLoginForm()
     Dim StudentID As String
     Dim Name As String
     
@@ -325,14 +312,15 @@ Dim strName As String
 
 ```vb
 ' ❌ 不推荐 - 可能导致错误
-Private Sub Document_Open()
-    Application.OnTime Now + TimeValue("0:00:01"), "AutoRun"
-End Sub
+Application.OnTime Now + TimeValue("0:00:01"), "AutoRun"
 
 ' ✅ 推荐 - 直接执行
 Private Sub Document_Open()
     On Error Resume Next
     YourProcedure
+    If Err.Number <> 0 Then
+        Debug.Print "错误: " & Err.Description
+    End If
     On Error GoTo 0
 End Sub
 ```
@@ -382,13 +370,13 @@ TimeSerial(0, 0, 0.5)
 ### 9.2 事件重复定义
 
 ```vb
-' ❌ 同时定义 Document_Open 和 AutoOpen
+' ❌ 同时定义 Document_Open 和 AutoOpen（会导致重复执行）
 Private Sub Document_Open()
     ' 代码1
 End Sub
 
 Private Sub AutoOpen()
-    ' 代码2 - 可能导致重复执行
+    ' 代码2
 End Sub
 
 ' ✅ 只保留一个
