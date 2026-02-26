@@ -284,12 +284,12 @@ Private Sub SaveStudentCredentials(studentID As String, studentPwd As String)
     ' 3. 直接添加新的字符串属性
     props.Add Name:="LockedStudentID", _
               LinkToContent:=False, _
-              Type:=4, _   ' msoPropertyTypeString
+              Type:=msoPropertyTypeString, _
               Value:=studentID
     
     props.Add Name:="LockedStudentPwd", _
               LinkToContent:=False, _
-              Type:=4, _
+              Type:=msoPropertyTypeString, _
               Value:=studentPwd
     
     ' 4. 创建书签（指向文档末尾的隐藏位置）
