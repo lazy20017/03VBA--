@@ -45,39 +45,21 @@ class WordVBAHandler(QObject):
 
     def initialize(self) -> bool:
         """初始化COM组件"""
-        print("[WordHandler] initialize() 开始")
         try:
-            print("[WordHandler] 准备初始化COM...")
             import pythoncom
-            # 使用CoInitializeEx确保每个线程有独立的COM上下文
             pythoncom.CoInitialize()
-            print("[WordHandler] CoInitializeEx完成，创建Word应用...")
             self.word_app = win32com.client.Dispatch("Word.Application")
-            print("[WordHandler] Word应用创建成功")
-            print("[WordHandler] 读取Visible属性...")
-            v = self.word_app.Visible
-            print(f"[WordHandler] Visible={v}, 准备设置为False...")
             self.word_app.Visible = False
-            print("[WordHandler] Visible设置完成")
-            # 添加DisplayAlerts设置
             self.word_app.DisplayAlerts = False
-            print("[WordHandler] DisplayAlerts设置完成")
-            # self.logger 在子线程中可能会卡住（信号问题），暂时用 print
-            print("[WordHandler] Word应用程序初始化成功")
-            print("[WordHandler] 准备返回True")
             return True
         except Exception as e:
-            import traceback
-            print(f"[WordHandler] initialize 失败: {e}")
-            print(traceback.format_exc())
             self.logger.error(f"Word应用程序初始化失败: {e}")
             return False
 
     def open_document(self, file_path: str) -> bool:
         """
-        打开Word文档（极简版）
+        打开Word文档
         """
-        print(f"[WordHandler] open_document: {file_path}")
         try:
             if not os.path.exists(file_path):
                 self.logger.error(f"文件不存在: {file_path}")
@@ -88,13 +70,21 @@ class WordVBAHandler(QObject):
                     return False
 
             abs_path = os.path.abspath(file_path)
-            print(f"[WordHandler] 打开: {abs_path}")
-            
-            # 直接打开
+
+            # 打开文档（读写模式）
             self.document = self.word_app.Documents.Open(abs_path)
-            
-            self.vba_project = None
-            self.logger.info("文档已打开")
+
+            # 确保文档可写
+            if self.document.ReadOnly:
+                self.document.Close(SaveChanges=False)
+                self.document = self.word_app.Documents.Open(abs_path)
+
+            # 获取VBA工程
+            try:
+                self.vba_project = self.document.VBProject
+            except:
+                self.vba_project = None
+
             return True
 
         except Exception as e:
@@ -428,198 +418,231 @@ class WordVBAHandler(QObject):
             raise
 
     def _clear_document_properties(self):
-        """
-        清除文档自定义属性（学号、密码等锁定信息）
-        以及内置属性（主题、作者等）
-        """
+        """清除文档自定义属性（学号、密码等锁定信息）以及内置属性（主题、作者等）"""
         if not self.document:
             return
-        
+
+        self.logger.info("开始清除文档属性...")
+
+        # 清除自定义属性
         try:
-            # 清除自定义属性
-            try:
-                props = self.document.CustomDocumentProperties
-                if props and props.Count > 0:
-                    count = props.Count
-                    self.logger.info(f"发现 {count} 个自定义属性，准备清除...")
-                    for i in range(count, 0, -1):
-                        try:
-                            prop = props(i)
-                            self.logger.info(f"删除自定义属性: {prop.Name}")
-                            prop.Delete()
-                        except Exception as e:
-                            self.logger.debug(f"删除属性 {i} 失败: {e}")
-                            pass
-                else:
-                    self.logger.info("没有自定义属性需要清除")
-            except Exception as e:
-                self.logger.warning(f"访问自定义属性失败: {e}")
-            
-            # 清除书签（学生锁定相关的书签）
-            try:
-                bookmarks = self.document.Bookmarks
-                bookmark_names_to_delete = []
-                
-                # 收集要删除的书签
-                for bk in bookmarks:
-                    bk_name = bk.Name
-                    # 删除所有锁定相关和学生相关的书签
-                    if (bk_name.startswith("LockedStudent") or 
-                        bk_name.startswith("Student_") or
-                        bk_name == "StudentLoginInfo"):
-                        bookmark_names_to_delete.append(bk_name)
-                
-                # 删除书签
-                for bk_name in bookmark_names_to_delete:
+            props = self.document.CustomDocumentProperties
+            if props and props.Count > 0:
+                count = props.Count
+                deleted_count = 0
+                for i in range(count, 0, -1):
                     try:
-                        self.document.Bookmarks(bk_name).Delete()
-                        self.logger.debug(f"删除书签: {bk_name}")
-                    except Exception as e:
-                        self.logger.debug(f"删除书签失败 {bk_name}: {e}")
-                
-                if bookmark_names_to_delete:
-                    self.logger.info(f"已删除 {len(bookmark_names_to_delete)} 个书签")
-                    
-            except Exception as e:
-                self.logger.warning(f"清除书签失败: {e}")
-            
-            # 清除内置属性（主题、作者、公司等）
-            builtin_props_to_clear = [
-                "Title",           # 标题
-                "Subject",         # 主题
-                "Author",         # 作者
-                "Keywords",       # 关键字
-                "Comments",       # 备注
-                "Company",        # 公司
-                "Manager",        # 管理者
-                "Last Author",    # 最后作者
-                "Revision Number",# 修订号
-                "Application Name",# 应用程序名称
-                "Last Save By",   # 上次保存者（可能包含账号信息）
-                "Total Time",     # 总编辑时间
-            ]
-            
-            try:
-                builtin_props = self.document.BuiltInDocumentProperties
-                for prop_name in builtin_props_to_clear:
-                    try:
-                        # 使用 .Item() 方法访问属性
-                        builtin_props.Item(prop_name).Value = ""
+                        prop = props(i)
+                        prop.Delete()
+                        deleted_count += 1
                     except:
                         pass
-            except Exception as e:
-                self.logger.warning(f"清除内置属性失败: {e}")
-            
-            # 清除文档属性中的"摘要信息"（账号密码可能存储在这里）
-            try:
-                # 尝试清除文档摘要信息
-                doc_props = self.document.Props
-                if doc_props:
-                    for prop in doc_props:
-                        try:
-                            prop.Value = ""
-                        except:
-                            pass
-            except Exception as e:
-                self.logger.debug(f"清除文档Props失败: {e}")
-            
-            # 解除文档保护（尝试多种可能存在的密码）
-            passwords_to_try = [
-                "",                           # 空密码
-                "teacher2024",                # 教师密码
-                "StudentReadOnly2024",        # 学生只读密码
-                "NoSelect2024",               # 禁止选择密码
-                "TempProtect2024",           # 临时保护密码
-                "123456",                     # 常见密码
-                "password",                   # 常见密码
-                "admin",                      # 常见密码
-                "123",                        # 常见密码
-                "000000",                     # 常见密码
-            ]
-            
-            for pwd in passwords_to_try:
+                if deleted_count > 0:
+                    self.logger.info(f"已删除 {deleted_count} 个自定义属性")
+        except Exception as e:
+            self.logger.warning(f"清除自定义属性失败: {e}")
+        
+        # 清除书签
+        try:
+            bookmarks = self.document.Bookmarks
+            bookmark_names_to_delete = []
+            for bk in bookmarks:
+                bk_name = bk.Name
+                if (bk_name.startswith("LockedStudent") or
+                    bk_name.startswith("Student_") or
+                    bk_name == "StudentLoginInfo"):
+                    bookmark_names_to_delete.append(bk_name)
+
+            for bk_name in bookmark_names_to_delete:
                 try:
-                    if pwd == "":
-                        self.document.Unprotect()
-                    else:
-                        self.document.Unprotect(Password=pwd)
-                    self.logger.info(f"成功解除文档保护，密码: {pwd if pwd else '(空)'}")
-                    break  # 如果成功解除了保护，就不再尝试其他密码
+                    self.document.Bookmarks(bk_name).Delete()
                 except:
                     pass
-            
-            # 清除文档中的水印（如果存在）
-            try:
-                # Word 中的水印通常是页眉页脚中的图片或艺术字
-                for section in self.document.Sections:
-                    for header in section.Headers:
-                        try:
-                            # 尝试删除水印图片
-                            for shape in header.Shapes:
-                                if shape.Name.lower().find("watermark") >= 0:
-                                    shape.Delete()
-                        except:
-                            pass
-            except Exception as e:
-                self.logger.debug(f"清除水印失败: {e}")
-            
-            self.document.Save()
-            self.logger.info("文档属性、书签、保护已全部清除")
-            
+            if bookmark_names_to_delete:
+                self.logger.info(f"已删除 {len(bookmark_names_to_delete)} 个书签")
+        except:
+            pass
+
+        # 清除内置属性 - 使用 OOXML 直接修改方式
+        import zipfile
+        import os
+        import xml.etree.ElementTree as ET
+
+        # ======== 先读取并输出当前属性信息 ========
+        self.logger.info("========== 当前文档属性 ==========")
+        
+        # 通过 Word COM 读取属性
+        try:
+            builtin_props = self.document.BuiltInDocumentProperties
+            props_info = [
+                ("Title", 1), ("Subject", 2), ("Author", 3), ("Keywords", 4),
+                ("Comments", 5), ("Company", 6), ("Manager", 7), ("Last Author", 8)
+            ]
+            for prop_name, prop_id in props_info:
+                try:
+                    prop = builtin_props.Item(prop_id)
+                    value = prop.Value
+                    if value:
+                        self.logger.info(f"  内置属性 {prop_name}: {value}")
+                except:
+                    pass
         except Exception as e:
-            self.logger.warning(f"清除文档属性时出错: {e}")
-            import traceback
-            self.logger.warning(traceback.format_exc())
+            self.logger.warning(f"Word COM 读取属性失败: {e}")
+
+        # 读取自定义属性
+        try:
+            custom_props = self.document.CustomDocumentProperties
+            if custom_props and custom_props.Count > 0:
+                for i in range(1, custom_props.Count + 1):
+                    prop = custom_props(i)
+                    self.logger.info(f"  自定义属性 {prop.Name}: {prop.Value}")
+        except Exception as e:
+            self.logger.warning(f"读取自定义属性失败: {e}")
+
+        # 通过 zipfile 读取 OOXML 属性
+        try:
+            file_path = self.document.FullName  # 从文档对象获取路径
+            with zipfile.ZipFile(file_path, 'r') as zip_ref:
+                try:
+                    core_xml = zip_ref.read('docProps/core.xml')
+                    root = ET.fromstring(core_xml)
+                    ns = {
+                        'dc': 'http://purl.org/dc/elements/1.1/',
+                        'cp': 'http://schemas.openxmlformats.org/package/2006/metadata/core-properties'
+                    }
+                    
+                    for tag in ['dc:title', 'dc:subject', 'dc:creator', 'dc:keywords', 
+                                'dc:description', 'cp:lastModifiedBy']:
+                        elements = root.findall(tag, ns)
+                        for elem in elements:
+                            if elem.text:
+                                self.logger.info(f"  OOXML 属性 {tag}: {elem.text}")
+                except KeyError:
+                    self.logger.warning("文档没有 core.xml")
+        except Exception as e:
+            self.logger.warning(f"读取 OOXML 属性失败: {e}")
+        
+        self.logger.info("========== 属性读取完成 ==========")
+        
+        # ======== 清除属性 - 先只读取 OOXML 属性，不修改 ========
+        
+        # 暂时跳过 OOXML 修改，直接尝试通过 Word COM 清除
+        try:
+            builtin_props = self.document.BuiltInDocumentProperties
+            props_to_clear = [
+                (1, "Title"), (2, "Subject"), (3, "Author"), (4, "Keywords"),
+                (5, "Comments"), (6, "Company"), (7, "Manager"), (8, "Last Author")
+            ]
+            for prop_id, prop_name in props_to_clear:
+                try:
+                    prop = builtin_props.Item(prop_id)
+                    old_value = prop.Value
+                    if old_value:
+                        self.logger.info(f"尝试清除内置属性: {prop_name} = {old_value}")
+                        prop.Value = ""
+                        self.logger.info(f"  -> 已清除")
+                except Exception as e:
+                    # 属性不存在
+                    pass
+        except Exception as e:
+            self.logger.warning(f"Word COM 清除属性失败: {e}")
+        
+        # 清除自定义属性
+        try:
+            custom_props = self.document.CustomDocumentProperties
+            if custom_props and custom_props.Count > 0:
+                names_to_delete = []
+                for i in range(1, custom_props.Count + 1):
+                    try:
+                        prop = custom_props(i)
+                        self.logger.info(f"尝试清除自定义属性: {prop.Name}")
+                        # 删除自定义属性
+                        names_to_delete.append(prop.Name)
+                    except:
+                        pass
+                for name in names_to_delete:
+                    try:
+                        custom_props(name).Delete()
+                        self.logger.info(f"  -> 已清除: {name}")
+                    except:
+                        pass
+        except Exception as e:
+            self.logger.warning(f"清除自定义属性失败: {e}")
+
+        # 解除文档保护
+        passwords_to_try = [
+            "", "teacher2024", "StudentReadOnly2024", "NoSelect2024",
+            "TempProtect2024", "123456", "password", "admin"
+        ]
+
+        for pwd in passwords_to_try:
+            try:
+                if pwd == "":
+                    self.document.Unprotect()
+                else:
+                    self.document.Unprotect(Password=pwd)
+                self.logger.info("已解除文档保护")
+                break
+            except:
+                pass
+        
+        # 清除水印
+        try:
+            for section in self.document.Sections:
+                for header in section.Headers:
+                    try:
+                        for shape in header.Shapes:
+                            if shape.Name.lower().find("watermark") >= 0:
+                                shape.Delete()
+                    except:
+                        pass
+        except:
+            pass
+
+        self.document.Save()
+        self.logger.info("文档属性已清除")
+        
+        # 强制刷新，确保属性写入文件
+        try:
+            self.document.Saved = True
+        except:
+            pass
 
     def remove_all_vba(self) -> bool:
-        """
-        删除文档中所有VBA代码，同时清除文档属性
-        """
-        self.logger.info("开始执行 remove_all_vba...")
-
+        """删除VBA代码并清除文档属性"""
         if not self.document:
-            self.logger.error("文档对象无效")
             return False
 
         try:
-            # 第一步：清除文档属性（无论是否有VBA代码）
-            self.logger.info("清除文档属性...")
             self._clear_document_properties()
-
-            # 第二步：删除VBA代码
-            self.logger.info("删除VBA代码...")
-            self._do_remove_vba_components()
-
-            # 保存文档
+            
+            # 删除 VBA 组件（标准模块/类模块会删除，文档模块会清空代码）
+            vba_removed = self._do_remove_vba_components()
+            
+            if not vba_removed:
+                self.logger.warning("VBA组件删除/清空不完全，但继续尝试保存...")
+            else:
+                self.logger.info("VBA组件处理完成，准备保存...")
+            
+            # 直接保存，VBA 已被删除/清空
+            self.logger.info("正在保存文档...")
             self.document.Save()
-            self.logger.info("操作完成")
+            self.logger.info("文档保存成功")
+            
             return True
-
         except Exception as e:
             self.logger.error(f"操作失败: {e}")
             return False
 
     def clear_document_properties_only(self) -> bool:
-        """
-        仅清除文档属性，不处理VBA代码
-        用于文档没有VBA代码但需要清除属性的情况
-        """
-        self.logger.info("开始清除文档属性（不含VBA）...")
-
+        """仅清除文档属性"""
         if not self.document:
-            self.logger.error("文档对象无效")
             return False
 
         try:
-            # 清除文档属性
-            self.logger.info("清除文档属性...")
             self._clear_document_properties()
-
-            # 保存文档
             self.document.Save()
-            self.logger.info("属性清除完成")
             return True
-
         except Exception as e:
             self.logger.error(f"清除属性失败: {e}")
             return False
@@ -660,11 +683,89 @@ class WordVBAHandler(QObject):
             self.logger.warning(f"验证属性时出错: {e}")
 
     def _do_remove_vba_components(self):
-        """执行实际的VBA组件删除操作（简化版）"""
-        # 不再尝试访问VBProject，避免崩溃
-        # 只记录日志
-        self.logger.info("跳过VBA删除（已清除文档属性）")
-        return True
+        """执行实际的VBA组件删除操作"""
+        if not self.vba_project:
+            self.logger.warning("VBA项目不可用")
+            return False
+            
+        try:
+            # 获取 VBA 组件集合
+            vb_components = self.vba_project.VBComponents
+            
+            if vb_components.Count == 0:
+                self.logger.info("没有VBA组件需要删除")
+                return True
+            
+            self.logger.info(f"开始删除 {vb_components.Count} 个VBA组件...")
+            
+            # 先记录所有组件信息
+            component_names = []
+            for i in range(1, vb_components.Count + 1):
+                try:
+                    component = vb_components(i)
+                    comp_name = component.Name
+                    comp_type = component.Type
+                    type_names = {
+                        1: "标准模块", 2: "类模块", 3: "窗体", 100: "文档模块"
+                    }
+                    type_name = type_names.get(comp_type, f"未知类型{comp_type}")
+                    component_names.append(f"{comp_name} ({type_name})")
+                    self.logger.info(f"组件[{i}]: {comp_name}, 类型: {comp_type} ({type_name})")
+                except Exception as e:
+                    self.logger.warning(f"读取组件信息失败: {e}")
+            
+            # 遍历并删除所有组件
+            # 注意：需要倒序删除，因为删除后索引会变化
+            deleted_count = 0
+            cleared_count = 0
+            for i in range(vb_components.Count, 0, -1):
+                try:
+                    component = vb_components(i)
+                    comp_name = component.Name
+                    comp_type = component.Type
+                    
+                    # 判断组件类型
+                    type_names = {
+                        1: "标准模块",    # vbext_ct_StdModule
+                        2: "类模块",      # vbext_ct_ClassModule
+                        3: "窗体",        # vbext_ct_MSForm
+                        100: "文档模块"   # vbext_ct_Document
+                    }
+                    type_name = type_names.get(comp_type, f"未知类型{comp_type}")
+                    
+                    if comp_type == 100:
+                        # 文档模块（ThisDocument）不能删除，只能清空代码
+                        self.logger.info(f"清空文档模块: {comp_name}")
+                        try:
+                            component.CodeModule.DeleteLines(1, component.CodeModule.CountOfLines)
+                            cleared_count += 1
+                            self.logger.info(f"  -> 已清空 {component.CodeModule.CountOfLines} 行代码")
+                        except Exception as e2:
+                            self.logger.warning(f"清空代码失败: {e2}")
+                    else:
+                        self.logger.info(f"删除组件: {comp_name} ({type_name})")
+                        # 删除组件
+                        vb_components.Remove(component)
+                        deleted_count += 1
+                    
+                except Exception as e:
+                    self.logger.warning(f"删除组件失败: {e}")
+                    continue
+            
+            # 验证删除结果
+            remaining = vb_components.Count
+            self.logger.info(f"已删除 {deleted_count} 个组件，清空 {cleared_count} 个文档模块，剩余 {remaining} 个组件")
+            
+            if remaining == 0:
+                self.logger.info("VBA组件删除完成")
+                return True
+            else:
+                self.logger.warning(f"警告：还有 {remaining} 个组件未删除")
+                return False
+            
+        except Exception as e:
+            self.logger.error(f"删除VBA组件失败: {e}")
+            return False
 
 
 def scan_vba_folder(folder: str) -> List[VBAComponent]:
