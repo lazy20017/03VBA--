@@ -573,7 +573,7 @@ class WordVBAHandler(QObject):
 
     def remove_all_vba(self) -> bool:
         """
-        删除文档中所有VBA代码，同时清除文档属性（简化版）
+        删除文档中所有VBA代码，同时清除文档属性
         """
         self.logger.info("开始执行 remove_all_vba...")
 
@@ -582,7 +582,7 @@ class WordVBAHandler(QObject):
             return False
 
         try:
-            # 第一步：清除文档属性
+            # 第一步：清除文档属性（无论是否有VBA代码）
             self.logger.info("清除文档属性...")
             self._clear_document_properties()
 
@@ -597,6 +597,31 @@ class WordVBAHandler(QObject):
 
         except Exception as e:
             self.logger.error(f"操作失败: {e}")
+            return False
+
+    def clear_document_properties_only(self) -> bool:
+        """
+        仅清除文档属性，不处理VBA代码
+        用于文档没有VBA代码但需要清除属性的情况
+        """
+        self.logger.info("开始清除文档属性（不含VBA）...")
+
+        if not self.document:
+            self.logger.error("文档对象无效")
+            return False
+
+        try:
+            # 清除文档属性
+            self.logger.info("清除文档属性...")
+            self._clear_document_properties()
+
+            # 保存文档
+            self.document.Save()
+            self.logger.info("属性清除完成")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"清除属性失败: {e}")
             return False
     
     def _verify_properties_cleared(self):

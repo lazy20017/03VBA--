@@ -195,12 +195,26 @@ class WorkerThread(QThread):
 
     def _do_remove(self):
         """执行清除VBA操作"""
-        self.log_signal.emit("正在清除所有VBA代码...")
-        success = self.handler.remove_all_vba()
-        if success:
-            self.finished.emit(True, "成功清除所有VBA代码")
+        # 先检查文档是否有VBA代码
+        self.log_signal.emit("正在检查VBA代码...")
+        components = self.handler.get_vba_components()
+
+        if len(components) > 0:
+            # 有VBA代码，执行完整清除
+            self.log_signal.emit(f"发现 {len(components)} 个VBA组件，正在清除...")
+            success = self.handler.remove_all_vba()
+            if success:
+                self.finished.emit(True, f"成功清除 {len(components)} 个VBA代码及文档属性")
+            else:
+                self.finished.emit(False, "清除VBA失败")
         else:
-            self.finished.emit(False, "清除VBA失败")
+            # 没有VBA代码，仅清除文档属性
+            self.log_signal.emit("文档中没有VBA代码，仅清除文档属性...")
+            success = self.handler.clear_document_properties_only()
+            if success:
+                self.finished.emit(True, "成功清除文档属性（无VBA代码）")
+            else:
+                self.finished.emit(False, "清除文档属性失败")
 
     def _on_log(self, msg):
         """处理日志消息"""
